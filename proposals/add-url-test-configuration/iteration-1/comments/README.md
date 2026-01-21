@@ -1,111 +1,175 @@
-# Iteration 1 Review Comments
+# Iteration 1 Review
 
-## Review Status: BLOCK
+## Status: BLOCK
 
-The proposal has architectural merit but requires changes before implementation.
+The proposal has good foundations but requires changes to align with HAI3 architecture.
 
-## Files
+---
 
-| File | Topic | Severity |
-|------|-------|----------|
-| [01-url-routing-format.md](./01-url-routing-format.md) | URL format should use prefix (`/_test/...`) | High |
-| [02-package-placement.md](./02-package-placement.md) | Distribute across L1/L2/L3 layers | High |
-| [03-event-driven-architecture.md](./03-event-driven-architecture.md) | MockController must use event bus | High |
-| [04-priority-chain-complexity.md](./04-priority-chain-complexity.md) | Simplify 8-level priority to 3-4 | Medium |
-| [05-protocol-support.md](./05-protocol-support.md) | Clarify REST-only scope for V1 | Low |
-| [06-data-flow-architecture.md](./06-data-flow-architecture.md) | Remove TestDataInitializer | **Critical** |
-| [07-solid-and-best-practices.md](./07-solid-and-best-practices.md) | SOLID analysis and best practices | Low |
-| [08-plugin-architecture.md](./08-plugin-architecture.md) | Separate `testing()` plugin from `mock()` | High |
-| [00-automated-review-original.md](./00-automated-review-original.md) | Original automated review | Reference |
+## Critical
 
-## Summary of Required Changes
+### Remove TestDataInitializer
 
-### Critical
+The proposal includes `TestDataInitializer` that populates state directly, bypassing the API layer.
 
-1. **Remove `TestDataInitializer`** - Test data must flow through API layer, not directly to state
+**Problem:** Effects don't fire, side effects are skipped, test code paths diverge from production.
 
-### High Priority
+**Fix:** Remove `TestDataInitializer` and `initializeCyberChatTestData()`. Scenarios define mock responses at the API level. Components call normal service methods.
 
-2. **Change URL format** to prefix (`/_test/{screen}/...`) for clear ownership boundaries
-3. **Distribute across layers** - Follow HAI3 layer architecture:
-   - `@hai3/api` (L1): TestScenarioPlugin, presets, MockDataLoader, FakerProcessor
-   - `@hai3/framework` (L2): testing() plugin, URL parsing, effects
-   - `@hai3/react` (L3): useTestConfig() hook (if needed)
-4. **Create separate `testing()` plugin** - Do not merge into `mock()`:
-   - `mock()` = infrastructure (toggle fake data on/off)
-   - `testing()` = configuration (scenarios, URL routing, per-endpoint control)
-   - `testing()` depends on `mock()`
-5. **Convert MockController** to event-driven pattern:
-   - Actions emit events (activateScenario, setEndpointOverride)
-   - Effects listen and coordinate (testingEffects)
-   - State via testingSlice (not class methods)
-   - UI in `@hai3/studio` (TestingPanel component)
+---
 
-### Medium Priority
+## High Priority
 
-6. **Simplify priority chain** from 8 levels to 3 (industry standard):
-   - Runtime overrides → Active scenario → Passthrough
-   - URL params and localStorage are scenario selectors, not priority levels
-   - Unify TS + JSON mocks at registration time
+### 1. URL Format
 
-### Low Priority
+**Proposal:** `/{screen}/_test/{scenario}`
 
-7. **Ensure protocol-agnostic design** for future extension:
-   - Rename `TestScenarioPlugin` → `TestScenarioRestPlugin`
-   - JSON schema should use protocol sections (`rest`, `sse`) not REST-specific root
-   - Scenario type should be protocol-agnostic with protocol-specific configs
-   - Add Non-Goal: "Not mocking SSE/WebSocket in V1"
-8. **Address ISP concern** - consider splitting `TestScenarioController` interface
+**Change to:** `/_test/{screen}/{scenario}`
 
-## Key Architectural Decisions
+**Why:** HAI3 framework controls the first path segment. Screens control subsequent segments. Prefix format keeps test routing as framework concern.
 
-### URL Format: Use Prefix
+---
 
-`/_test/{screen}/{scenario}` instead of `/{screen}/_test/{scenario}`
+### 2. MockController → Event-Driven Actions
 
-**Rationale**: HAI3 framework controls first path segment (screen ID). Screens control subsequent segments. Prefix format keeps test routing as framework concern with clear ownership boundary.
+**Proposal:** Imperative `MockController` class with methods like `enable()`, `disable()`.
 
-### Package Placement: Distribute Across Layers
+**Change to:** Event-driven actions following HAI3's Flux pattern:
 
-Follow existing mock infrastructure pattern:
-- Protocol plugins → `@hai3/api` (L1)
-- Framework plugins → `@hai3/framework` (L2)
-- React hooks → `@hai3/react` (L3)
+```typescript
+// Actions emit events
+function activateScenario(scenarioId: string): void {
+  eventBus.emit(TestingEvents.ScenarioActivated, { scenarioId });
+}
 
-**Rationale**: Maintains single import source principle. Users import from one layer only. Tree-shaking handles dev-only code exclusion. Do NOT create separate `@hai3/testing` package.
-
-### Plugin Architecture: Separate mock() and testing()
-
-```
-┌─────────────────────────────────────┐
-│  testing()                          │  ← Scenario configuration
-│  - URL-based activation             │
-│  - Scenario management              │
-│  - Per-endpoint overrides           │
-├─────────────────────────────────────┤
-│  mock()                             │  ← Mock infrastructure
-│  - Enable/disable fake data         │
-│  - Plugin lifecycle                 │
-└─────────────────────────────────────┘
+// Effects listen and update state
+eventBus.on(TestingEvents.ScenarioActivated, ({ scenarioId }) => {
+  store.dispatch(addActiveScenario(scenarioId));
+});
 ```
 
-**Rationale**: Different responsibilities (infrastructure vs configuration). Industry standard pattern. Respects HAI3's composable plugin model. Allows mock-only usage for simple development.
+**State shape:**
+```typescript
+interface TestingState {
+  activeScenarios: string[];
+  endpointOverrides: Record<string, EndpointOverride>;
+}
+```
 
-### Data Flow: Mock at API Level
+---
 
-Test scenarios should activate mock plugins, not inject data into state directly.
+### 3. Add testing() Plugin
 
-**Rationale**: Preserves event-driven data flow. Effects fire normally. Side effects (analytics, logging) work in test mode.
+**Not in proposal.** Add a separate `testing()` framework plugin.
 
-## What's Good
+| Plugin | Responsibility |
+|--------|----------------|
+| `mock()` | Infrastructure - toggle fake data on/off |
+| `testing()` | Configuration - scenarios, URL routing, per-endpoint control |
 
-- Plugin-based approach extends existing infrastructure
-- JSON mock files enable non-developer collaboration
-- Development-only guards for tree-shaking
-- Vertical slice ownership for mock data
-- Faker templates for dynamic test data
-- TestScenarioPlugin extending RestPluginWithConfig follows existing patterns
+```typescript
+createHAI3()
+  .use(mock())
+  .use(testing())  // depends on mock
+  .build();
+```
+
+**Why:** Different responsibilities. Industry standard pattern. Allows mock-only usage.
+
+---
+
+### 4. Clarify Package Distribution
+
+**Proposal:** Places components in `@hai3/api` but doesn't specify full distribution.
+
+**Clarify:**
+
+| Layer | Components |
+|-------|------------|
+| `@hai3/api` (L1) | TestScenarioRestPlugin, TestScenarioPresets, MockDataLoader, FakerProcessor |
+| `@hai3/framework` (L2) | testing() plugin, testingSlice, testingEffects, URL utilities |
+| `@hai3/react` (L3) | useTestConfig() hook (if needed), re-exports |
+| `@hai3/studio` | TestingPanel component |
+
+---
+
+### 5. State Management
+
+**Proposal:** localStorage as primary for MockController preferences.
+
+**Change to:**
+- **URL** is primary activation mechanism (`/_test/{screen}/{scenario}`)
+- **State slice** holds current config
+- **localStorage** is optional "remember preferences" feature
+
+On refresh, URL is reparsed. No persistence required for core functionality.
+
+---
+
+## Medium Priority
+
+### 6. Resolve Priority Chain Inconsistency
+
+**Proposal has internal inconsistency:**
+- "Layered Scenario Resolution" decision: **3 tiers**
+- "Mock Priority Chain" decision: **8 levels**
+
+**Recommendation:** Go with 3 tiers consistently (matches industry standard):
+
+```
+1. Runtime Overrides (highest)  - setEndpointOverride()
+2. Active Scenario              - from URL
+3. Passthrough (lowest)         - Real API
+```
+
+URL params and localStorage are scenario selectors, not separate priority levels.
+
+---
+
+## Low Priority
+
+### 7. Protocol-Agnostic Schema
+
+**Proposal:** JSON schema is REST-specific at root (`"endpoint": "GET /path"`).
+
+**Change to:** Protocol sections for future extensibility:
+
+```json
+{ "id": "empty", "rest": { "GET /api/sessions": {...} } }
+```
+
+Rename `TestScenarioPlugin` → `TestScenarioRestPlugin`.
+
+Add Non-Goal: "Not mocking SSE/WebSocket in V1".
+
+---
+
+## What's Good (No Changes Needed)
+
+- Plugin-based approach extending existing infrastructure
+- JSON mock files for human-readable data
+- Development-only guards (`import.meta.env.DEV`)
+- Vertical slice ownership (`src/screensets/{name}/mocks/`)
+- Faker templates for dynamic data
+- 3-tier priority concept (just needs to be applied consistently)
+
+---
+
+## Summary
+
+| Item | Proposal | Change To |
+|------|----------|-----------|
+| Data flow | TestDataInitializer | Mock at API level |
+| URL format | `/{screen}/_test/...` | `/_test/{screen}/...` |
+| MockController | Imperative class | Event-driven actions |
+| testing() plugin | Not present | Add separate plugin |
+| Package distribution | Unclear | Specify L1/L2/L3 |
+| State/persistence | localStorage primary | URL primary |
+| Priority levels | 3 and 8 (inconsistent) | 3 consistently |
+| JSON schema | REST-specific root | Protocol sections |
+
+---
 
 ## Next Steps
 
-Author should address high-priority items and resubmit for iteration-2 review.
+Address critical and high-priority items, then resubmit for iteration-2 review.
